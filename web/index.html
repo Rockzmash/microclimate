@@ -160,7 +160,8 @@ let prevSpectrum = null;
 // Particle system
 let particles = [];
 const MAX_PARTICLES = 400;
-const IDLE_SPAWN_RATE = 0.3;  // particles/frame in dead silence
+const IDLE_SPAWN_RATE = 0.6;  // particles/frame in dead silence
+let spawnAccumulator = 0;     // fractional accumulator for smooth spawning
 
 // Visual state
 let baseHue = 200; // start cool blue
@@ -206,8 +207,10 @@ function draw() {
     hueShift = map(flux, 0, 30, 10, 90);
   }
 
-  // Spawn particles
-  let toSpawn = floor(spawnRate);
+  // Spawn particles — use fractional accumulator so spawning works at low rates
+  spawnAccumulator += spawnRate;
+  let toSpawn = floor(spawnAccumulator);
+  spawnAccumulator -= toSpawn;
   let activeHue = (baseHue + hueShift) % 360;
 
   for (let i = 0; i < toSpawn; i++) {
