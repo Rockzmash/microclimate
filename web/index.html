@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Microclimate</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    user-select: none;
+  }
+  canvas { display: block; }
+
+  /* --- HUD --- */
+  #hud {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    z-index: 10;
+  }
+  .hud-panel {
+    background: rgba(10, 10, 20, 0.75);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 10px 18px;
+    color: #ccc;
+    font-size: 13px;
+    min-width: 90px;
+    text-align: center;
+    transition: all 0.3s ease;
+  }
+  .hud-panel label {
+    display: block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: #666;
+    margin-bottom: 4px;
+  }
+  .hud-panel .value { font-size: 18px; font-weight: 600; }
+
+  /* --- Controls --- */
+  #controls {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 10;
+  }
+  button {
+    background: rgba(10, 10, 20, 0.75);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    color: #aaa;
+    padding: 10px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+  }
+  button:hover { color: #fff; border-color: rgba(255,255,255,0.3); }
+  button.active { color: #88ccff; border-color: #88ccff44; }
+
+  #mic-warning {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(10,10,20,0.9);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 32px;
+    color: #ccc;
+    text-align: center;
+    z-index: 100;
+    display: none;
+  }
+  #mic-warning button {
+    margin-top: 16px;
+    background: #88ccff22;
+    border-color: #88ccff44;
+    color: #88ccff;
+  }
+
+  #status {
+    position: fixed;
+    top: 24px;
+    left: 24px;
+    color: #444;
+    font-size: 12px;
+    z-index: 10;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<div id="status">● waiting for mic...</div>
+
+<div id="controls">
+  <button id="btn-mic" onclick="toggleMic()">🎤 Mic</button>
+  <button id="btn-lights" onclick="toggleLights()">💡 Lights</button>
+  <button id="btn-discover" onclick="discoverLights()">🔍 Scan</button>
+  <button id="btn-palette" onclick="cyclePalette()">🎨 Hue</button>
+</div>
+
+<div id="hud">
+  <div class="hud-panel"><label>Volume</label><span class="value" id="val-vol">—</span></div>
+  <div class="hud-panel"><label>Mood</label><span class="value" id="val-mood">calm</span></div>
+  <div class="hud-panel"><label>Particles</label><span class="value" id="val-parts">0</span></div>
+  <div class="hud-panel"><label>Lights</label><span class="value" id="val-lights">—</span></div>
+</div>
+
+<div id="mic-warning">
+  <p>🎤 Microclimate needs microphone access</p>
+  <p style="font-size:12px;color:#666;margin-top:4px">Audio stays local — nothing is recorded or sent anywhere.</p>
+  <button onclick="startMic()">Allow Microphone</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+<script>
+// =============================================================================
+// MICROCLIMATE — Audio-reactive particle system + Govee light sync
+// =============================================================================
+
+// --- State ---
+const PROXY_URL = "http://localhost:8765";
+let audioCtx = null;
+let analyser = null;
+let micStream = null;
+let micActive = false;
+
+let lightsActive = false;
+let activeLightIp = null;
+let lights = [];
+let lastLightSend = 0;
+const LIGHT_INTERVAL_MS = 150; // throttle light updates
+
+// Audio features (smoothed)
+let rms = 0;
+let centroid = 0;
+let flux = 0;
+let bassEnergy = 0;
+
+// Smoothing
+const SMOOTH = 0.12;
+let prevSpectrum = null;
+
+// Particle system
+let particles = [];
+const MAX_PARTICLES = 400;
+const IDLE_SPAWN_RATE = 0.3;  // particles/frame in dead silence
+
+// Visual state
+let baseHue = 200; // start cool blue
+let currentPalette = 0;
+const PALETTES = [
+  { base: 200, range: 60, name: "cool" },   // blue-cyan
+  { base: 30,  range: 60, name: "warm" },    // orange-yellow
+  { base: 140, range: 80, name: "green" },   // green-teal
+  { base: 290, range: 70, name: "purple" },  // purple-magenta
+  { base: 0,   range: 40, name: "fire" },    // red-orange
+];
+
+// --- p5.js Sketch ---
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  noStroke();
+  document.getElementById("mic-warning").style.display = "block";
+}
+
+function draw() {
+  // Background — subtle fade, not full clear (creates trails)
+  background(220, 10, 4, 15);
+
+  // Update audio features
+  if (analyser) {
+    updateAudioFeatures();
+  }
+
+  // Determine "mood"
+  let mood = "calm";
+  let spawnRate = IDLE_SPAWN_RATE;
+  let hueShift = 0;
+
+  if (rms > 0.08) {
+    mood = "active";
+    spawnRate = map(rms, 0.08, 0.4, 2, 12, true);
+    hueShift = map(centroid, 300, 4000, 0, 60);
+  }
+  if (rms > 0.25) {
+    mood = "loud";
+    spawnRate = map(rms, 0.25, 0.6, 12, 25, true);
+    hueShift = map(flux, 0, 30, 10, 90);
+  }
+
+  // Spawn particles
+  let toSpawn = floor(spawnRate);
+  let activeHue = (baseHue + hueShift) % 360;
+
+  for (let i = 0; i < toSpawn; i++) {
+    if (particles.length < MAX_PARTICLES) {
+      spawnParticle(activeHue);
+    }
+  }
+
+  // Update + draw particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+    p.life--;
+
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+      continue;
+    }
+
+    // Forces
+    let lifeRatio = p.life / p.maxLife;
+
+    // Audio-driven turbulence
+    let turb = flux * 3;
+    p.vx += (noise(p.pos.x * 0.003, p.pos.y * 0.003, frameCount * 0.02) - 0.5) * turb;
+    p.vy += (noise(p.pos.x * 0.003 + 100, p.pos.y * 0.003, frameCount * 0.02) - 0.5) * turb;
+
+    // Gentle gravity + outward drift
+    let dx = p.pos.x - width / 2;
+    let dy = p.pos.y - height / 2;
+    let dist = sqrt(dx * dx + dy * dy) + 1;
+    p.vx += dx / dist * 0.15;
+    p.vy += dy / dist * 0.15;
+
+    // Damping
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+
+    p.pos.x += p.vx;
+    p.pos.y += p.vy;
+
+    // Draw
+    let alpha = lifeRatio * 80;
+    let size = p.size * lifeRatio;
+    fill((p.hue + frameCount * 0.3) % 360, 60, 90, alpha);
+    ellipse(p.pos.x, p.pos.y, size, size);
+  }
+
+  // Bass thump flash
+  if (bassEnergy > 0.15) {
+    let flashAlpha = map(bassEnergy, 0.15, 0.5, 3, 12, true);
+    let cx = width / 2;
+    let cy = height / 2;
+    for (let i = 0; i < 6; i++) {
+      let angle = random(TWO_PI);
+      let r = random(50, 200);
+      fill((activeHue + 30) % 360, 40, 95, flashAlpha * 2);
+      ellipse(cx + cos(angle) * r, cy + sin(angle) * r, random(3, 8));
+    }
+  }
+
+  // Send light update
+  if (lightsActive && activeLightIp && millis() - lastLightSend > LIGHT_INTERVAL_MS) {
+    sendLightUpdate(activeHue);
+    lastLightSend = millis();
+  }
+
+  // Update HUD
+  document.getElementById("val-vol").textContent = Math.round(rms * 100);
+  document.getElementById("val-mood").textContent = mood;
+  document.getElementById("val-parts").textContent = particles.length;
+
+  if (lightsActive) {
+    document.getElementById("val-lights").textContent =
+      activeLightIp ? activeLightIp.split(".").pop() : "—";
+  }
+}
+
+function spawnParticle(hue) {
+  let cx = width / 2;
+  let cy = height / 2;
+  let angle = random(TWO_PI);
+  let speed = map(rms, 0, 0.5, 0.3, 3);
+  let radius = map(centroid, 200, 3000, 20, 300);
+
+  particles.push({
+    pos: createVector(cx + cos(angle) * radius * 0.3, cy + sin(angle) * radius * 0.3),
+    vx: cos(angle) * speed + random(-0.5, 0.5),
+    vy: sin(angle) * speed + random(-0.5, 0.5),
+    hue: (hue + random(-20, 20)) % 360,
+    size: random(2, map(rms, 0, 0.4, 6, 16)),
+    life: random(80, 200),
+    maxLife: 200,
+  });
+}
+
+// --- Audio Analysis ---
+async function startMic() {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+    let source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.4;
+    source.connect(analyser);
+
+    micActive = true;
+    prevSpectrum = new Float32Array(analyser.frequencyBinCount);
+
+    document.getElementById("mic-warning").style.display = "none";
+    document.getElementById("btn-mic").classList.add("active");
+    document.getElementById("btn-mic").textContent = "🎤 On";
+    document.getElementById("status").textContent = "● listening";
+    document.getElementById("status").style.color = "#558855";
+  } catch (e) {
+    console.error("Mic error:", e);
+    document.getElementById("status").textContent = "● mic denied";
+    document.getElementById("status").style.color = "#885555";
+  }
+}
+
+function toggleMic() {
+  if (micActive) {
+    if (micStream) {
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
+    }
+    if (audioCtx) audioCtx.close();
+    audioCtx = null;
+    analyser = null;
+    micActive = false;
+    rms = 0;
+    flux = 0;
+    document.getElementById("btn-mic").classList.remove("active");
+    document.getElementById("btn-mic").textContent = "🎤 Mic";
+    document.getElementById("status").textContent = "● mic off";
+    document.getElementById("status").style.color = "#444";
+  } else {
+    startMic();
+  }
+}
+
+function updateAudioFeatures() {
+  let bins = analyser.frequencyBinCount;
+  let data = new Float32Array(bins);
+  analyser.getFloatTimeDomainData(data);
+
+  // RMS (volume)
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+  let rawRms = sqrt(sum / data.length);
+  rms = rms * (1 - SMOOTH) + rawRms * SMOOTH;
+
+  // Frequency data for centroid, bass, flux
+  let freqData = new Float32Array(bins);
+  analyser.getFloatFrequencyData(freqData);
+
+  // Spectral centroid
+  let weightedSum = 0;
+  let totalMag = 0;
+  for (let i = 0; i < bins; i++) {
+    let mag = pow(10, freqData[i] / 20); // dB to linear
+    let freq = (i / bins) * (audioCtx.sampleRate / 2);
+    weightedSum += freq * mag;
+    totalMag += mag;
+  }
+  let rawCentroid = totalMag > 0 ? weightedSum / totalMag : 0;
+  centroid = centroid * (1 - SMOOTH) + rawCentroid * SMOOTH;
+
+  // Spectral flux (how much the spectrum changed)
+  if (prevSpectrum) {
+    let fluxSum = 0;
+    for (let i = 0; i < bins; i++) {
+      let diff = freqData[i] - prevSpectrum[i];
+      fluxSum += diff * diff;
+    }
+    let rawFlux = sqrt(fluxSum / bins);
+    flux = flux * (1 - SMOOTH * 0.5) + rawFlux * SMOOTH * 0.5;
+  }
+  prevSpectrum.set(freqData);
+
+  // Bass energy (sub-250Hz)
+  let bassIdx = floor(250 / (audioCtx.sampleRate / 2) * bins);
+  let bassMag = 0;
+  for (let i = 0; i < bassIdx; i++) {
+    bassMag += pow(10, freqData[i] / 20);
+  }
+  let rawBass = bassMag / bassIdx;
+  bassEnergy = bassEnergy * (1 - SMOOTH * 0.7) + rawBass * SMOOTH * 0.7;
+}
+
+// --- Govee Lights ---
+async function discoverLights() {
+  document.getElementById("btn-discover").textContent = "⏳...";
+  try {
+    let res = await fetch(PROXY_URL + "/api/lights");
+    let data = await res.json();
+    lights = data.lights;
+    console.log("Found lights:", lights);
+
+    if (lights.length > 0) {
+      activeLightIp = lights[0].ip;
+      document.getElementById("val-lights").textContent = lights[0].name || lights[0].ip;
+      document.getElementById("btn-discover").textContent = `🔍 ${lights.length} found`;
+    } else {
+      document.getElementById("btn-discover").textContent = "🔍 none";
+      document.getElementById("val-lights").textContent = "0";
+    }
+  } catch (e) {
+    console.error("Discover error:", e);
+    document.getElementById("btn-discover").textContent = "🔍 err";
+    document.getElementById("val-lights").textContent = "proxy?";
+  }
+}
+
+let lastR = 0, lastG = 0, lastB = 0, lastBri = 0;
+const LIGHT_SMOOTH = 0.25;
+
+function sendLightUpdate(hue) {
+  if (!activeLightIp) return;
+
+  // Map audio → light
+  let targetBri = floor(map(rms, 0, 0.5, 5, 100));
+  targetBri = constrain(targetBri, 1, 100);
+
+  // Spectral centroid → warmth
+  let warmth = map(centroid, 200, 4000, 0, 1);
+  let targetHue = (hue + warmth * 25) % 360;
+
+  // Bass thump → brightness spike
+  if (bassEnergy > 0.15) {
+    targetBri = min(100, targetBri + floor(bassEnergy * 50));
+  }
+
+  // Smooth
+  lastR = lastR * (1 - LIGHT_SMOOTH) + targetR(targetHue) * LIGHT_SMOOTH;
+  lastG = lastG * (1 - LIGHT_SMOOTH) + targetG(targetHue) * LIGHT_SMOOTH;
+  lastB = lastB * (1 - LIGHT_SMOOTH) + targetB(targetHue) * LIGHT_SMOOTH;
+  lastBri = lastBri * (1 - LIGHT_SMOOTH) + targetBri * LIGHT_SMOOTH;
+
+  let r = floor(lastR);
+  let g = floor(lastG);
+  let b = floor(lastB);
+  let brightness = floor(lastBri);
+
+  // Only send if changed meaningfully
+  fetch(PROXY_URL + "/api/lights/" + activeLightIp, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ r, g, b, brightness, power: brightness > 1 }),
+  }).catch(() => {}); // proxy might be down — don't spam console
+}
+
+function toggleLights() {
+  if (!lightsActive && lights.length === 0) {
+    discoverLights().then(() => {
+      if (lights.length > 0) {
+        lightsActive = true;
+        document.getElementById("btn-lights").classList.add("active");
+        document.getElementById("btn-lights").textContent = "💡 On";
+      }
+    });
+  } else {
+    lightsActive = !lightsActive;
+    if (!lightsActive) {
+      // Turn off light
+      if (activeLightIp) {
+        fetch(PROXY_URL + "/api/lights/" + activeLightIp, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ power: false }),
+        }).catch(() => {});
+      }
+      document.getElementById("btn-lights").classList.remove("active");
+      document.getElementById("btn-lights").textContent = "💡 Lights";
+      document.getElementById("val-lights").textContent = "off";
+    } else {
+      document.getElementById("btn-lights").classList.add("active");
+      document.getElementById("btn-lights").textContent = "💡 On";
+    }
+  }
+}
+
+function cyclePalette() {
+  currentPalette = (currentPalette + 1) % PALETTES.length;
+  let p = PALETTES[currentPalette];
+  baseHue = p.base;
+  document.getElementById("btn-palette").textContent = `🎨 ${p.name}`;
+}
+
+// HSB → RGB helpers
+function targetR(h) { return map(sin(radians(h)), -1, 1, 0, 255); }
+function targetG(h) { return map(sin(radians(h + 120)), -1, 1, 0, 255); }
+function targetB(h) { return map(sin(radians(h + 240)), -1, 1, 0, 255); }
+
+// Resize
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+</script>
+</body>
+</html>
