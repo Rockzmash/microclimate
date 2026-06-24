@@ -153,6 +153,13 @@ let centroid = 0;
 let flux = 0;
 let bassEnergy = 0;
 
+// Beat detection
+let bassAvg = 0;          // rolling average of bass energy
+let beatCooldown = 0;     // frames until next beat can trigger
+let beatFlash = 0;        // current beat flash brightness (decays)
+const BEAT_THRESHOLD = 1.6;  // spike must be this x above average to count as beat
+const BEAT_COOLDOWN_FRAMES = 8; // min frames between beats (~133ms at 60fps)
+
 // Smoothing
 const SMOOTH = 0.12;
 let prevSpectrum = null;
@@ -258,16 +265,16 @@ function draw() {
     ellipse(p.pos.x, p.pos.y, size, size);
   }
 
-  // Bass thump flash
-  if (bassEnergy > 0.15) {
-    let flashAlpha = map(bassEnergy, 0.15, 0.5, 3, 12, true);
+  // Beat flash — triggered by onset detector, decays quickly
+  if (beatFlash > 0.01) {
+    let flashAlpha = beatFlash * 18;
     let cx = width / 2;
     let cy = height / 2;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       let angle = random(TWO_PI);
-      let r = random(50, 200);
-      fill((activeHue + 30) % 360, 40, 95, flashAlpha * 2);
-      ellipse(cx + cos(angle) * r, cy + sin(angle) * r, random(3, 8));
+      let r = random(40, 220);
+      fill((activeHue + 30) % 360, 40, 98, flashAlpha);
+      ellipse(cx + cos(angle) * r, cy + sin(angle) * r, random(4, 10));
     }
   }
 
@@ -401,6 +408,15 @@ function updateAudioFeatures() {
   }
   let rawBass = bassMag / bassIdx;
   bassEnergy = bassEnergy * (1 - SMOOTH * 0.7) + rawBass * SMOOTH * 0.7;
+
+  // Beat detection — spike in bass vs rolling average
+  bassAvg = bassAvg * 0.95 + bassEnergy * 0.05;
+  if (beatCooldown > 0) beatCooldown--;
+  if (beatCooldown === 0 && bassAvg > 0.001 && bassEnergy > bassAvg * BEAT_THRESHOLD) {
+    beatFlash = 1.0;   // trigger beat
+    beatCooldown = BEAT_COOLDOWN_FRAMES;
+  }
+  beatFlash *= 0.75;  // decay each frame
 }
 
 // --- Govee Lights ---
@@ -441,9 +457,9 @@ function sendLightUpdate(hue) {
   let warmth = map(centroid, 200, 4000, 0, 1);
   let targetHue = (hue + warmth * 25) % 360;
 
-  // Bass thump → brightness spike
-  if (bassEnergy > 0.15) {
-    targetBri = min(100, targetBri + floor(bassEnergy * 50));
+  // Beat onset → snap brightness to max, let it decay naturally next frame
+  if (beatFlash > 0.5) {
+    targetBri = 100;
   }
 
   // Smooth
@@ -502,10 +518,28 @@ function cyclePalette() {
   document.getElementById("btn-palette").textContent = `🎨 ${p.name}`;
 }
 
-// HSB → RGB helpers
-function targetR(h) { return map(sin(radians(h)), -1, 1, 0, 255); }
-function targetG(h) { return map(sin(radians(h + 120)), -1, 1, 0, 255); }
-function targetB(h) { return map(sin(radians(h + 240)), -1, 1, 0, 255); }
+// HSB → RGB (proper conversion, s=0.85, b=1.0)
+function hsbToRgb(h, s, v) {
+  h = ((h % 360) + 360) % 360;
+  let c = v * s;
+  let x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  let m = v - c;
+  let r, g, b;
+  if      (h < 60)  { r=c; g=x; b=0; }
+  else if (h < 120) { r=x; g=c; b=0; }
+  else if (h < 180) { r=0; g=c; b=x; }
+  else if (h < 240) { r=0; g=x; b=c; }
+  else if (h < 300) { r=x; g=0; b=c; }
+  else              { r=c; g=0; b=x; }
+  return [
+    Math.round((r + m) * 255),
+    Math.round((g + m) * 255),
+    Math.round((b + m) * 255),
+  ];
+}
+function targetR(h) { return hsbToRgb(h, 0.85, 1.0)[0]; }
+function targetG(h) { return hsbToRgb(h, 0.85, 1.0)[1]; }
+function targetB(h) { return hsbToRgb(h, 0.85, 1.0)[2]; }
 
 // Resize
 function windowResized() { resizeCanvas(windowWidth, windowHeight); }

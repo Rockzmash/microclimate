@@ -133,7 +133,8 @@ def control_light(ip: str):
             color_data["color"]["g"] = int(data["g"])
             color_data["color"]["b"] = int(data["b"])
         if "brightness" in data:
-            color_data["color"]["brightness"] = int(data["brightness"])
+            # brightness is a top-level field in colorwc, not nested inside color
+            color_data["brightness"] = int(data["brightness"])
         commands.append({"msg": {"cmd": "colorwc", "data": color_data}})
 
     if not commands:
