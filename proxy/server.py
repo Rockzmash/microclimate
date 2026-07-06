@@ -154,9 +154,9 @@ def health():
 
 
 if __name__ == "__main__":
-    print("🔮 Microclimate Proxy starting on http://localhost:8765")
+    print("🔮 Microclimate Proxy starting on http://localhost:8770")
     print("   Endpoints:")
     print("   GET  /api/lights       — discover Govee devices")
     print("   POST /api/lights/<ip>  — control a light")
     print("   GET  /health           — health check")
-    app.run(host="0.0.0.0", port=8765, debug=False)
+    app.run(host="0.0.0.0", port=8770, debug=False)  # 8770: distinct from Sobo's 8765
