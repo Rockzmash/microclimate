@@ -18,7 +18,7 @@ if not exist ".venv" (
     call .venv\Scripts\activate.bat
 )
 
-echo   Proxy running at http://localhost:8765
+echo   Proxy running at http://localhost:8770
 echo.
 echo   Open that URL in your browser (Firefox recommended).
 echo   Press Ctrl+C here to shut everything down.

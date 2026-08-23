@@ -12,12 +12,10 @@ import time
 import threading
 from dataclasses import dataclass, field
 from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
 
 app = Flask(__name__, static_folder=WEB_DIR)
-CORS(app)
 
 
 @app.route("/")
@@ -159,4 +157,5 @@ if __name__ == "__main__":
     print("   GET  /api/lights       — discover Govee devices")
     print("   POST /api/lights/<ip>  — control a light")
     print("   GET  /health           — health check")
-    app.run(host="0.0.0.0", port=8770, debug=False)  # 8770: distinct from Sobo's 8765
+    # Browser UI and API share one origin; outbound UDP still reaches Govee devices on the LAN.
+    app.run(host="127.0.0.1", port=8770, debug=False)  # 8770: distinct from Sobo's 8765
